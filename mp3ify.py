@@ -5,10 +5,10 @@ import spotipy as sp
 from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
-from typing import List, Iterator
+from typing import List, Iterator, Optional
 
 
-SPOTIFY_API_SCOPE = "user-library-read,playlist-modify-private"
+SPOTIFY_API_SCOPE = "user-library-read,playlist-read-private,playlist-modify-private"
 
 @dataclass
 class SpotifyConnection():
@@ -39,14 +39,13 @@ def spotify_connect() -> SpotifyConnection :
     username = connection.current_user()['display_name']
     return SpotifyConnection(connection, userid=userid, username=username)
 
-def spotify_check_playlist(connection : SpotifyConnection, playlistname : str, playlistid : str = None) -> List[str]:
-    playlists = connection.connection.current_user_playlists(limit=50)
-    while playlists:
-        for i, playlist in enumerate(playlists['items']):
-            if playlist['name'] == playlistname:
-                return [playlist]
-            if playlistid != None and playlist['id'] == playlistid:
-                return [playlist]
+def spotify_check_playlist(connection : SpotifyConnection, playlistname : str, playlistid : str = None) -> Optional[str]:
+    playlists = connection.connection.current_user_playlists(limit=50)['items']
+    for i, playlist in enumerate(playlists):
+        if playlist['name'] == playlistname:
+            return playlist
+        if playlistid != None and playlist['id'] == playlistid:
+            return playlist
     return None
     
 def spotify_create_playlist(connection : SpotifyConnection, playlistname : str) -> str:
@@ -103,9 +102,10 @@ def main(args : Namespace):
     # Check if playlist exists - create if it's new
     playlist = spotify_check_playlist(connection, playlistname=args.playlist)
     if playlist == None:
-        playlistid = connection.connection.user_playlist_create(connection.userid, args.playlist, public=False)['id']
-    else:
-        playlistid = playlist['id']
+        playlist = connection.connection.user_playlist_create(connection.userid, args.playlist, public=False)
+    playlistid = playlist.get('id',None)
+    if playlistid == None:
+        return # FIXME - exception tbd
 
     # Check all MP3s and create a tracklist
     nTotal : int = 0
@@ -119,6 +119,7 @@ def main(args : Namespace):
             tracks.append(track)
 
     # Append all tracks to the list
+    # FIXME - each track should be double checked to avoid duplicates!
     l = [t.url for t in tracks]
     connection.connection.user_playlist_add_tracks(connection.userid, playlistid, l)
     nSpotify = len(tracks)
