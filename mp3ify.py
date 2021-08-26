@@ -56,7 +56,7 @@ def spotify_create_playlist(connection : SpotifyConnection, playlistname : str) 
     return playlistid
 
 def mp3_walk_directory(dir : str) -> Iterator[TrackInfo] :
-    for fn in glob.glob(f"{dir}/*.mp3"):
+    for fn in glob.glob(f"{dir}/**/*.mp3", recursive=True):
         try :
             with open(fn,'r') as f:
                 try:
