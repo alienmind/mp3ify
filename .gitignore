@@ -133,3 +133,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Credentials and environment variables
+*.env

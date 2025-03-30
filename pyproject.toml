@@ -1,0 +1,117 @@
+# Specifies the build system (setuptools is common, but others like flit, poetry, or hatch exist)
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Core project metadata
+[project]
+name = "mp3ify"
+version = "0.1.0"
+authors = [
+  { name="AlienMind", email="alienmind@gmail.com" },
+  # Add other authors if any
+]
+description = "Sync local MP3 files metadata to a Spotify playlist." # Replace with your description
+readme = "README.md" # Optional: Path to your README file
+requires-python = ">=3.8" # Specify the Python versions your project supports
+license = { file = "LICENSE" } # Optional: Specify your license, e.g., MIT, Apache-2.0
+keywords = ["spotify", "mp3", "playlist", "sync", "music", "metadata"] # Optional: Keywords for PyPI
+classifiers = [ # Optional: PyPI classifiers (https://pypi.org/classifiers/)
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Environment :: Console",
+    # Add other relevant classifiers
+]
+
+# Project dependencies (replace with your actual dependencies)
+dependencies = [
+    "eyed3",     # From requirements.txt
+    "spotipy",   # From requirements.txt
+    "python-dotenv>=1.0.0",  # Added for .env file support
+    # Add version specifiers if needed, e.g., "eyed3>=0.9"
+]
+
+# Optional dependencies (e.g., for development, testing, specific features)
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.6",
+    "pyright>=1.1.350",
+    "pre-commit",
+    # Add other development dependencies
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov", # For measuring test coverage
+    # Add other testing-specific dependencies
+]
+docs = [
+    "sphinx",
+    # Add dependencies needed to build documentation
+]
+
+# Ruff configuration
+[tool.ruff]
+# Global settings
+line-length = 88
+target-version = "py38"
+
+# Linter settings
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "PL", "PTH"]
+ignore = []
+
+# Formatter settings
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+# Pyright configuration
+[tool.pyright]
+include = ["mp3ify.py"]
+exclude = ["**/__pycache__", ".venv", "build"]
+pythonVersion = "3.8"
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+
+# Mypy configuration
+# [tool.mypy]
+# python_version = "3.8"
+# warn_return_any = true
+# warn_unused_configs = true
+# Add other mypy settings
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+    # Add other test directories if needed
+]
+
+# Define project entry points (optional)
+# For command-line scripts
+[project.scripts]
+mp3ify = "mp3ify:main" # Assumes your main script is mp3ify.py and has a main() function
+
+# For GUI scripts
+# [project.gui-scripts]
+# your-gui-app = "your_package.gui:start_app"
+
+# Project URLs (optional)
+[project.urls]
+Homepage = "https://github.com/alienmind/mp3ify"
+Repository = "https://github.com/alienmind/mp3ify"
+"Bug Tracker" = "https://github.com/alienmind/mp3ify/issues" 
