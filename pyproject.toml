@@ -30,11 +30,16 @@ classifiers = [ # Optional: PyPI classifiers (https://pypi.org/classifiers/)
     # Add other relevant classifiers
 ]
 
-# Project dependencies (replace with your actual dependencies)
+# Project dependencies
 dependencies = [
     "eyed3",     # From requirements.txt
     "spotipy",   # From requirements.txt
     "python-dotenv>=1.0.0",  # Added for .env file support
+    # --- Added dependencies from spotify-to-mp3-python ---
+    "youtube-search-python>=1.6.6", # For searching YouTube
+    "yt-dlp>=2023.11.16",          # For downloading YouTube audio
+    "mutagen>=1.47.0",             # For adding MP3 metadata
+    # --- End of added dependencies ---
     # Add version specifiers if needed, e.g., "eyed3>=0.9"
 ]
 
@@ -45,11 +50,14 @@ dev = [
     "ruff>=0.1.6",
     "pyright>=1.1.350",
     "pre-commit",
+    # --- Added requests for optional album art download ---
+    "requests>=2.20.0",
     # Add other development dependencies
 ]
 test = [
     "pytest>=7.0",
     "pytest-cov", # For measuring test coverage
+    "requests>=2.20.0", # Needed for testing album art download if implemented
     # Add other testing-specific dependencies
 ]
 docs = [
@@ -101,7 +109,7 @@ testpaths = [
     # Add other test directories if needed
 ]
 
-# Define project entry points (optional)
+# Define project entry points
 # For command-line scripts
 [project.scripts]
 mp3ify = "mp3ify:main" # Assumes your main script is mp3ify.py and has a main() function
@@ -110,7 +118,7 @@ mp3ify = "mp3ify:main" # Assumes your main script is mp3ify.py and has a main() 
 # [project.gui-scripts]
 # your-gui-app = "your_package.gui:start_app"
 
-# Project URLs (optional)
+# Project URLs
 [project.urls]
 Homepage = "https://github.com/alienmind/mp3ify"
 Repository = "https://github.com/alienmind/mp3ify"
