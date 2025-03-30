@@ -8,7 +8,7 @@ from concurrent.futures import (
     as_completed,
 )  # Added for parallel downloads
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, cast
+from typing import Any, Dict, Iterator, List, Optional, cast, Tuple
 
 import eyed3
 import requests  # Added for album art download
@@ -29,7 +29,7 @@ SPOTIFY_API_SCOPE = "user-library-read,playlist-read-private,playlist-modify-pri
 CHUNK_SIZE = 100
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
-MAX_WORKERS = 5  # Max parallel downloads
+# DEFAULT_MAX_WORKERS = 5 # Can replace the old MAX_WORKERS constant
 
 # Constants for magic numbers
 TRACK_FORMAT_PARTS_4 = 4  # TrackNo - Artist - Album - Name
@@ -506,21 +506,37 @@ def search_youtube(track: TrackInfo) -> Optional[str]:
 def sanitize_filename(name: str) -> str:
     """
     Removes characters from a string that are typically invalid in filenames
-    across different operating systems.
+    across different operating systems and cleans common YouTube title additions.
 
     Args:
-        name: The input string (potential filename part).
+        name: The input string (potential filename part, likely from YouTube title).
 
     Returns:
         A sanitized string suitable for use in filenames.
     """
-    # Remove characters like < > : " / \ | ? * and control characters
+    # 1. Remove common YouTube additions (case-insensitive)
+    #    Patterns like (Official Music Video), [Lyrics], | Artist Name etc.
+    name = re.sub(r'\s*\(.*Official Video.*?\)\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\(.*Music Video.*?\)\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\(.*Lyric Video.*?\)\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\(.*Audio.*?\)\s*', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*\[.*?\]\s*', '', name) # Remove content in square brackets
+    name = re.sub(r'\s*\|.*$', '', name) # Remove pipe and everything after
+    name = re.sub(r'\s*//.*$', '', name) # Remove double slash and everything after
+
+    # 2. Remove characters invalid in filenames
     name = re.sub(r'[<>:"/\\|?*\n\t]', "", name)
-    # Replace sequences of whitespace with a single space
+
+    # 3. Clean up whitespace: replace multiple spaces/tabs with single space, strip ends
     name = re.sub(r"\s+", " ", name).strip()
+
+    # 4. Optional: Consolidate multiple hyphens or dashes if needed
+    # name = re.sub(r'-+', '-', name).strip('-')
+
     # Optional: Limit filename length if needed
     # max_len = 100
     # name = name[:max_len]
+
     return name
 
 
@@ -706,6 +722,183 @@ def download_track_from_youtube(track: TrackInfo, output_dir: pathlib.Path) -> b
         return False
 
 
+def _parse_youtube_title(raw_title: str) -> str:
+    """
+    Cleans a raw YouTube video title by removing common additions.
+
+    Args:
+        raw_title: The original title string from YouTube.
+
+    Returns:
+        A cleaned title string.
+    """
+    cleaned_title = raw_title # Start with the raw title
+
+    # Apply aggressive cleaning (remove common junk)
+    cleaned_title = re.sub(r'\s*\(.*Official Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'\s*\(.*Music Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'\s*\(.*Lyric Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'\s*\(.*Audio.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'\s*\[.*?\]\s*', '', cleaned_title) # Remove content in square brackets
+    cleaned_title = re.sub(r'\s*\|.*$', '', cleaned_title) # Remove pipe and everything after
+    cleaned_title = re.sub(r'\s*//.*$', '', cleaned_title) # Remove double slash and everything after
+    # Add more specific rules if needed, e.g., removing " | Napalm Records" specifically
+    # cleaned_title = re.sub(r'\s*\|\s*Napalm Records\s*$', '', cleaned_title, flags=re.IGNORECASE)
+
+    # Remove potential leftover invalid filename chars AFTER specific cleaning
+    cleaned_title = re.sub(r'[<>:"/\\|?*\n\t]', "", cleaned_title)
+    # Clean up whitespace
+    cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
+    # Clean potential leading/trailing hyphens left from splits/removals
+    cleaned_title = cleaned_title.strip("- ")
+
+    print(f"  Cleaned YT Title: '{cleaned_title}' (From: '{raw_title[:50]}...')")
+    return cleaned_title
+
+
+# --- Add Helper to Write Tags ---
+def _write_youtube_tags(filepath: pathlib.Path, artist: Optional[str], title: Optional[str], info_dict: Dict):
+    """
+    Writes ID3 tags (artist, title, album art) to an MP3 file using Mutagen,
+    specifically for files downloaded from YouTube.
+
+    Args:
+        filepath: Path to the MP3 file.
+        artist: The guessed artist name.
+        title: The cleaned title.
+        info_dict: The yt-dlp info dictionary containing thumbnail path.
+    """
+    if not filepath.is_file():
+        print(f"  Error writing tags: File not found at {filepath}")
+        return
+
+    print(f"  Writing ID3 Tags for: {filepath.name}")
+    try:
+        # --- Add Basic Tags (Title, Artist) ---
+        try:
+            audio = EasyID3(filepath)
+        except ID3NoHeaderError:
+            print(f"    No ID3 header found, creating one for {filepath.name}.")
+            audio_id3_create = ID3()
+            audio_id3_create.save(filepath)
+            audio = EasyID3(filepath)
+
+        if title:
+            audio["title"] = title
+            # Clear potentially incorrect album extracted by yt-dlp if we only have title/artist
+            if "album" in audio: del audio["album"]
+        if artist:
+            audio["artist"] = artist
+        audio.save()
+        print(f"    Saved Title='{title}', Artist='{artist}'")
+
+        # --- Embed Thumbnail as Album Art ---
+        # yt-dlp puts the final thumbnail path in 'thumbnail' key AFTER processing
+        thumbnail_path_str = info_dict.get('thumbnail')
+        if thumbnail_path_str and pathlib.Path(thumbnail_path_str).is_file():
+            thumbnail_path = pathlib.Path(thumbnail_path_str)
+            print(f"    Attempting to embed thumbnail: {thumbnail_path.name}")
+            try:
+                with open(thumbnail_path, 'rb') as art_file:
+                    image_data = art_file.read()
+
+                # Determine MIME type from file extension
+                ext = thumbnail_path.suffix.lower()
+                if ext in ['.jpg', '.jpeg']:
+                    mime = 'image/jpeg'
+                elif ext == '.png':
+                    mime = 'image/png'
+                elif ext == '.webp':
+                     mime = 'image/webp' # Mutagen supports webp in APIC
+                else:
+                    print(f"    Warning: Unsupported thumbnail image type '{ext}', skipping embed.")
+                    return
+
+                audio_id3_art = ID3(filepath)
+                audio_id3_art.delall('APIC') # Remove existing art
+                audio_id3_art.add(
+                    APIC(
+                        encoding=3, mime=mime, type=3, desc='Cover', data=image_data
+                    )
+                )
+                audio_id3_art.save(v2_version=3)
+                print(f"    Successfully embedded thumbnail as album art.")
+
+            except FileNotFoundError:
+                 print(f"    Error embedding thumbnail: File not found at {thumbnail_path_str}")
+            except Exception as art_e:
+                 print(f"    Error embedding thumbnail: {art_e}")
+        else:
+            print(f"    No valid thumbnail path found in info_dict ('{thumbnail_path_str}').")
+
+    except Exception as meta_e:
+        print(f"  Error writing tags to {filepath.name}: {meta_e}")
+
+
+def rename_hook(d: Dict[str, Any]):
+    """
+    yt-dlp hook function called after download and postprocessing.
+    Finds the final MP3 file, renames it using playlist index, uploader/channel as artist,
+    and sanitized title, then writes cleaned ID3 tags.
+
+    Args:
+        d: Dictionary passed by yt-dlp containing download status and info.
+    """
+    if d['status'] == 'finished':
+        info_dict = d.get('info_dict', {})
+        final_filepath_str = info_dict.get('filepath') or d.get('filename')
+        if not final_filepath_str: # ... (error handling) ...
+             return
+        final_filepath = pathlib.Path(final_filepath_str).resolve()
+        if not final_filepath.is_file() or final_filepath.suffix.lower() != '.mp3': # ... (error handling) ...
+             return
+
+        # --- Get necessary info for new name and tags ---
+        playlist_index_str = str(info_dict.get('playlist_index', '00'))
+        playlist_index_padded = playlist_index_str.zfill(2)
+        raw_title = info_dict.get('title', final_filepath.stem)
+
+        # --- Determine Artist (Uploader/Channel) and Clean Title ---
+        # Use 'uploader' or 'channel' as the best guess for Artist
+        artist_guess = info_dict.get('uploader') or info_dict.get('channel') or "Unknown Artist"
+        # Clean the raw title using the simplified function
+        cleaned_title = _parse_youtube_title(raw_title)
+
+        # --- Construct New Filename ---
+        # Combine index, guessed artist, and cleaned title
+        new_filename_stem = f"{playlist_index_padded} - {artist_guess} - {cleaned_title}"
+        # Sanitize the fully constructed stem
+        new_filename_stem_sanitized = sanitize_filename(new_filename_stem)
+        new_filename = f"{new_filename_stem_sanitized}.mp3"
+        new_filepath = final_filepath.parent / new_filename
+
+        # --- Perform Rename ---
+        final_path_for_tags = None
+        # ... (rest of rename logic remains the same, determining final_path_for_tags) ...
+        if final_filepath == new_filepath:
+             print(f"  Filename already correct: '{final_filepath.name}'")
+             final_path_for_tags = final_filepath # Use the existing path
+        else:
+            try:
+                print(f"  Renaming: '{final_filepath.name}' -> '{new_filename}'")
+                final_filepath.rename(new_filepath)
+                final_path_for_tags = new_filepath # Use the new path for tags
+            except OSError as e:
+                print(f"  ERROR renaming file '{final_filepath.name}' to '{new_filename}': {e}")
+                if final_filepath.is_file():
+                     print(f"  Attempting to write tags to original file path: {final_filepath.name}")
+                     final_path_for_tags = final_filepath
+            except Exception as e:
+                 print(f"  Unexpected error during rename: {e}")
+
+        # --- Write Corrected ID3 Tags ---
+        if final_path_for_tags:
+            # Pass the determined artist and cleaned title to the tag writer
+            _write_youtube_tags(final_path_for_tags, artist_guess, cleaned_title, info_dict)
+        else:
+             print(f"  Skipping tag writing due to rename/file access issues for original: {final_filepath.name}")
+
+
 def run_sync_to_spotify(args: Namespace, connection: SpotifyConnection) -> int:
     """
     Implements the 'to-spotify' command. Scans local MP3s, finds matches
@@ -808,15 +1001,21 @@ def run_sync_from_spotify(args: Namespace, connection: SpotifyConnection) -> int
     """
     Implements the 'from-spotify' command. Fetches tracks from a Spotify playlist,
     searches YouTube, downloads audio, converts to MP3, and adds metadata.
+    Uses parallel workers for searching and downloading.
 
     Args:
-        args: Parsed command-line arguments specific to 'from-spotify'.
+        args: Parsed command-line arguments including 'num_cores'.
         connection: The authenticated SpotifyConnection object.
 
     Returns:
         0 on success, 1 on failure.
     """
     print("\nStarting sync: Spotify Playlist -> Local MP3s")
+
+    # Determine number of workers
+    # If num_cores is 0, ThreadPoolExecutor uses default (usually CPU cores)
+    max_workers_to_use = args.num_cores if args.num_cores > 0 else None
+    print(f"Using up to {max_workers_to_use or 'maximum available'} workers for parallel tasks.")
 
     if not args.playlist_id:
         print("Error: Spotify Playlist ID is required via --playlist-id.")
@@ -838,10 +1037,11 @@ def run_sync_from_spotify(args: Namespace, connection: SpotifyConnection) -> int
         return 1 # Exit if no tracks to process
 
     # 2. Search YouTube for each track (in parallel)
-    print(f"\nSearching YouTube for {len(spotify_tracks)} tracks using up to {MAX_WORKERS} workers...")
+    print(f"\nSearching YouTube for {len(spotify_tracks)} tracks...")
     tracks_with_youtube_url: List[TrackInfo] = []
     search_futures = {}
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="youtube_search") as executor:
+    # Use the determined number of workers
+    with ThreadPoolExecutor(max_workers=max_workers_to_use, thread_name_prefix="youtube_search") as executor:
         # Submit all search tasks
         for track in spotify_tracks:
             future = executor.submit(search_youtube, track)
@@ -864,11 +1064,12 @@ def run_sync_from_spotify(args: Namespace, connection: SpotifyConnection) -> int
         return 1 # Exit if no tracks can be downloaded
 
     # 3. Download and convert tracks (in parallel)
-    print(f"\nDownloading {len(tracks_with_youtube_url)} tracks using up to {MAX_WORKERS} workers...")
+    print(f"\nDownloading {len(tracks_with_youtube_url)} tracks...")
     download_futures = {}
     successful_downloads = 0
     failed_downloads = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="youtube_download") as executor:
+    # Use the determined number of workers
+    with ThreadPoolExecutor(max_workers=max_workers_to_use, thread_name_prefix="youtube_download") as executor:
         # Submit all download tasks
         for track in tracks_with_youtube_url:
             future = executor.submit(download_track_from_youtube, track, output_dir)
@@ -901,26 +1102,154 @@ def run_sync_from_spotify(args: Namespace, connection: SpotifyConnection) -> int
     return 0
 
 
+def run_sync_from_youtube(args: Namespace) -> int:
+    """
+    Implements the 'from-youtube' command. Downloads audio from all videos
+    in a YouTube playlist using yt-dlp, converts to MP3, adds metadata,
+    and renames files using a sanitized title via a postprocessor hook.
+
+    Args:
+        args: Parsed command-line arguments including 'num_cores'.
+
+    Returns:
+        0 on success, 1 on failure.
+    """
+    print("\nStarting sync: YouTube Playlist -> Local MP3s")
+
+    # Acknowledge the num_cores setting, although yt-dlp manages its own parallelism
+    num_cores_info = args.num_cores if args.num_cores > 0 else 'maximum available'
+    print(f"(Note: yt-dlp manages download parallelism internally; --num-cores setting '{num_cores_info}' not directly applied here.)")
+
+    if not args.playlist_url:
+        print("Error: YouTube Playlist URL is required via --playlist-url.")
+        return 1
+
+    # Prepare output directory
+    try:
+        output_dir = pathlib.Path(args.directory).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Output directory set to: {output_dir}")
+    except Exception as e:
+        print(f"Error creating output directory '{args.directory}': {e}")
+        return 1
+
+    # --- Determine Default for Keeping Intermediate Files (YouTube Only) ---
+    default_keep_intermediate = False
+    try:
+        env_keep = os.environ.get("MP3IFY_KEEP_INTERMEDIATE", "false").lower()
+        if env_keep in ('true', '1', 'yes', 'y'):
+            default_keep_intermediate = True
+            print(f"Using MP3IFY_KEEP_INTERMEDIATE environment variable: {default_keep_intermediate}")
+    except Exception: # Catch potential errors during env var processing
+        print(f"Warning: Invalid value for MP3IFY_KEEP_INTERMEDIATE env var. Using default: {default_keep_intermediate}")
+        default_keep_intermediate = False
+
+    # --- Configure yt-dlp options for playlist download ---
+    # Use a simple, reliable template like video ID initially.
+    # The hook will rename the final file based on sanitized title and index.
+    output_template = output_dir / "%(id)s.%(ext)s" # Use video ID for initial temp name
+
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": str(output_template), # Initial template using video ID
+        "noplaylist": False,
+        "ignoreerrors": True,
+        "quiet": False,
+        "noprogress": False,
+        "keepvideo": args.keep_intermediate_files,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            },
+            # Metadata/Thumbnail embedding PPs should run before our rename hook
+            {'key': 'FFmpegMetadata', 'add_metadata': True}, # Add whatever metadata yt-dlp can find initially
+            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
+        ],
+        "writethumbnail": True,
+        # 'addmetadata': True, # FFmpegMetadata is likely sufficient
+        'embedthumbnail': True, # Tell FFmpeg PP to embed
+        'retries': MAX_RETRIES,
+        'postprocessor_hooks': [rename_hook], # Our hook runs last
+    }
+
+    print(f"Attempting to download playlist: {args.playlist_url}")
+    try:
+        ydl = YoutubeDL(ydl_opts) # type: ignore[operator]
+        error_code = ydl.download([args.playlist_url])
+
+        if error_code == 0:
+            print("\nPlaylist download process completed successfully (check logs for skipped/renamed files).")
+            if args.keep_intermediate_files:
+                print("(Note: Intermediate files like original downloads and thumbnails were kept.)")
+            else:
+                print("(Note: Intermediate files were deleted, only final MP3s remain.)")
+            return 0
+        else:
+            print(f"\nPlaylist download process finished, but yt-dlp reported errors (exit code: {error_code}).")
+            return 1
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred during YouTube playlist download: {e}")
+        return 1
+
+
 def setup() -> Namespace:
     """
     Parses command-line arguments using argparse, including subparsers for
-    different commands ('to-spotify', 'from-spotify'). Also handles loading
-    of environment variables from a .env file and validates required credentials.
+    different commands ('to-spotify', 'from-spotify', 'from-youtube'). Also handles loading
+    of environment variables from a .env file, validates required credentials,
+    and determines the number of parallel workers.
 
     Returns:
         An argparse.Namespace object containing the parsed arguments.
     """
     parser = ArgumentParser(
-        description="Sync music between local MP3 files and Spotify playlists."
+        description="Sync music between local MP3s, Spotify playlists, and YouTube playlists."
     )
-    # Optional argument to specify a non-default .env file location
+
+    # --- Determine Default Number of Cores ---
+    # Priority: Environment Variable (NUMCORES) > Default (e.g., 5)
+    default_num_cores = 5 # Fallback default
+    try:
+        env_cores = os.environ.get("NUMCORES")
+        if env_cores is not None:
+            default_num_cores = int(env_cores)
+            print(f"Using NUMCORES environment variable: {default_num_cores}")
+            # Clamp non-negative, 0 means max parallelism later
+            if default_num_cores < 0:
+                default_num_cores = 5 # Reset to fallback if negative
+    except ValueError:
+        print(f"Warning: Invalid value for NUMCORES environment variable ('{env_cores}'). Using default: {default_num_cores}")
+        default_num_cores = 5 # Reset to fallback
+
+    # --- Determine Default for Keeping Intermediate Files (YouTube Only) ---
+    default_keep_intermediate = False
+    try:
+        env_keep = os.environ.get("MP3IFY_KEEP_INTERMEDIATE", "false").lower()
+        if env_keep in ('true', '1', 'yes', 'y'):
+            default_keep_intermediate = True
+            print(f"Using MP3IFY_KEEP_INTERMEDIATE environment variable: {default_keep_intermediate}")
+    except Exception: # Catch potential errors during env var processing
+        print(f"Warning: Invalid value for MP3IFY_KEEP_INTERMEDIATE env var. Using default: {default_keep_intermediate}")
+        default_keep_intermediate = False
+
+    # --- Global Arguments (Apply to all commands) ---
     parser.add_argument(
         "--env-file",
-        dest="env_file",
+        dest="env_file", action="store", required=False, type=str,
+        help="Path to .env file (defaults to '.env' in current directory)",
+    )
+    parser.add_argument(
+        "--num-cores",
+        dest="num_cores",
         action="store",
         required=False,
-        type=str,
-        help="Path to .env file (defaults to '.env' in current directory)",
+        type=int,
+        default=default_num_cores, # Default set based on env var or fallback
+        help="Number of parallel workers for downloads (0 for max available cores, "
+             f"default: {default_num_cores} based on NUMCORES env var or fallback)",
     )
 
     # Group for authentication arguments, common to all subcommands
@@ -955,7 +1284,7 @@ def setup() -> Namespace:
 
     # Define subparsers for the main commands
     subparsers = parser.add_subparsers(
-        dest="command", help="Choose sync direction: 'to-spotify' or 'from-spotify'", required=True
+        dest="command", help="Choose operation: 'to-spotify', 'from-spotify', or 'from-youtube'", required=True
     )
 
     # --- Subparser: to-spotify (Local MP3s -> Spotify Playlist) ---
@@ -1005,7 +1334,39 @@ def setup() -> Namespace:
         help="Directory to save downloaded MP3 files",
     )
 
+    # --- Subparser: from-youtube (YouTube Playlist -> Local MP3s) ---
+    parser_from_youtube = subparsers.add_parser(
+        "from-youtube", help="Download audio from a YouTube playlist to local MP3s"
+    )
+    parser_from_youtube.add_argument(
+        "--playlist-url",
+        dest="playlist_url",
+        action="store",
+        required=True, # YouTube Playlist URL is mandatory
+        type=str,
+        help="URL of the YouTube playlist to download",
+    )
+    parser_from_youtube.add_argument(
+        "--directory",
+        "-d",
+        dest="directory",
+        action="store",
+        required=False,
+        type=str,
+        default="youtube_downloads/", # Different default output directory
+        help="Directory to save downloaded MP3 files",
+    )
+    parser_from_youtube.add_argument(
+        "--keep-intermediate-files",
+        dest="keep_intermediate_files",
+        action="store_true", # Makes it a boolean flag
+        default=default_keep_intermediate, # Default based on env var
+        help="Keep all downloaded files (e.g., original format, thumbnails), not just the final MP3. "
+             "(Default: delete intermediates)",
+    )
+
     # Parse the arguments provided
+    # The --num-cores value will be determined by: command-line > env var > fallback default
     args = parser.parse_args()
 
     # --- Load .env file ---
@@ -1033,25 +1394,25 @@ def setup() -> Namespace:
 
     # --- Validate required credentials ---
     # Check that essential Spotify credentials are set after all loading methods
-    if not (
-        os.environ.get("SPOTIPY_CLIENT_ID")
-        and os.environ.get("SPOTIPY_CLIENT_SECRET")
-        and os.environ.get("SPOTIPY_REDIRECT_URI")
-    ):
-        # Use parser.error to exit gracefully with help message
-        parser.error(
-            "Missing Spotify credentials. Provide SPOTIPY_CLIENT_ID, "
-            "SPOTIPY_CLIENT_SECRET, and SPOTIPY_REDIRECT_URI via arguments, "
-            "environment variables, or a .env file."
-        )
+    if args.command in ["to-spotify", "from-spotify"]:
+        if not (
+            os.environ.get("SPOTIPY_CLIENT_ID")
+            and os.environ.get("SPOTIPY_CLIENT_SECRET")
+            and os.environ.get("SPOTIPY_REDIRECT_URI")
+        ):
+            parser.error(
+                f"Missing Spotify credentials for command '{args.command}'. Provide SPOTIPY_CLIENT_ID, "
+                "SPOTIPY_CLIENT_SECRET, and SPOTIPY_REDIRECT_URI via arguments, "
+                "environment variables, or a .env file."
+            )
 
     return args
 
 
 def main_dispatcher(args: Namespace) -> int:
     """
-    Main application dispatcher. Connects to Spotify and calls the appropriate
-    sync function based on the parsed command-line arguments.
+    Main application dispatcher. Connects to Spotify if needed and calls the
+    appropriate sync function based on the parsed command-line arguments.
 
     Args:
         args: The parsed Namespace object containing arguments and the subcommand.
@@ -1059,20 +1420,21 @@ def main_dispatcher(args: Namespace) -> int:
     Returns:
         The exit code of the executed sync function (0 for success, 1 for failure).
     """
-    # Connect to Spotify - needed for both operations
-    connection = spotify_connect()
-    # Check connection object validity - spotify_connect handles fatal errors
-    if not connection or not connection.connection:
-         print("Fatal Error: Could not establish Spotify connection.")
-         return 1
-
-    # Dispatch based on the chosen command
     command = args.command
     print(f"\nExecuting command: {command}")
 
+    # Only connect to Spotify if needed
+    connection: Optional[SpotifyConnection] = None
+    if command in ["to-spotify", "from-spotify"]:
+        connection = spotify_connect()
+        if not connection or not connection.connection:
+            print("Fatal Error: Could not establish Spotify connection for this command.")
+            return 1
+
+    # Dispatch based on the chosen command
     if command == "to-spotify":
-        # 'to-spotify' requires a user ID to create/modify playlists
-        if not connection.userid:
+        # 'to-spotify' requires a user ID
+        if not connection or not connection.userid: # Ensure connection is not None here
             print(
                 "Error: Could not retrieve Spotify user information required "
                 "for 'to-spotify' command. Authentication might have failed."
@@ -1081,10 +1443,15 @@ def main_dispatcher(args: Namespace) -> int:
         return run_sync_to_spotify(args, connection)
 
     elif command == "from-spotify":
-        # 'from-spotify' primarily needs the connection object to fetch playlist
-        # data, which might work even without full user info in some auth flows,
-        # but generally requires successful authentication.
+        # 'from-spotify' also requires the connection
+        if not connection: # Should not happen if check above passes, but belt-and-suspenders
+             print("Error: Spotify connection object missing for 'from-spotify'.")
+             return 1
         return run_sync_from_spotify(args, connection)
+
+    elif command == "from-youtube":
+        # 'from-youtube' does not require Spotify connection
+        return run_sync_from_youtube(args)
 
     else:
         # This case should be unreachable if subparsers are required=True

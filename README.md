@@ -1,10 +1,16 @@
-# mp3ify
-Sync music between local MP3 files and Spotify playlists. Supports two-way synchronization: upload local MP3 metadata to Spotify, or download Spotify playlist tracks as MP3s via YouTube.
+# mp3ify - Spotify / Youtube / MP3 playlist portability tool
+
+<p align="center">
+  <img src="img/mp3ify-logo.png" alt="mp3ify Logo" width="200"/>
+</p>
+
+Sync music between local MP3 files and Spotify / Youtube playlists. Supports two-way synchronization: upload local MP3 metadata to Spotify, or download Spotify playlist tracks as MP3s via YouTube.
 
 ## Features
 
 *   **Sync Local to Spotify (`sync-to-spotify`)**: Scan a local directory of MP3 files, find matching tracks on Spotify, and add them to a specified Spotify playlist.
 *   **Sync Spotify to Local (`sync-from-spotify`)**: Fetch tracks from a Spotify playlist, search for corresponding audio on YouTube, download them as MP3 files, and apply metadata (title, artist, album, cover art).
+*   **Download YouTube Playlist (`from-youtube`)**: Download audio from a YouTube playlist directly as MP3s.
 *   Uses `.env` file, environment variables, or command-line arguments for Spotify API configuration.
 *   Parallel downloads for faster Spotify-to-Local syncing.
 
@@ -29,6 +35,15 @@ Sync music between local MP3 files and Spotify playlists. Supports two-way synch
     6.  `yt-dlp` converts the audio to MP3 format and attempts to embed metadata (title, artist, album) and the video thumbnail as cover art directly during the download/conversion process.
     7.  Saves the resulting MP3 file to the specified output directory with a sanitized filename (e.g., `Artist - Title.mp3`).
     8.  **Limitation**: This process relies entirely on finding a suitable match on YouTube. If a track from the Spotify playlist isn't available on YouTube or the search doesn't find the correct match, that track cannot be downloaded.
+
+*   **Download YouTube Playlist (`from-youtube`)**:
+    1.  Takes a YouTube playlist URL as input.
+    2.  Uses `yt-dlp` (which requires **FFmpeg**) to iterate through the playlist videos.
+    3.  For each video, downloads the best audio stream.
+    4.  Converts the audio to MP3 format.
+    5.  Attempts to embed metadata extracted from YouTube (title, uploader, etc.) and the video thumbnail as cover art during the download/conversion process.
+    6.  Saves the resulting MP3 file to the specified output directory using a sanitized filename format like `Index - Title.mp3`.
+    7.  **Limitation**: Metadata quality depends entirely on what's available on YouTube for each video. Artist/Album information might be inaccurate or missing compared to Spotify.
 
 ## Prerequisites
 
@@ -207,6 +222,31 @@ python mp3ify.py from-spotify --playlist-id 37i9dQZF1DXcBWIGoYBM5M
 python mp3ify.py from-spotify --playlist-id 37i9dQZF1DXcBWIGoYBM5M -d ./downloaded_music
 ```
 
+### Download YouTube Playlist to Local MP3s
+
+```bash
+python mp3ify.py from-youtube --playlist-url <YOUTUBE_PLAYLIST_URL> [OPTIONS]
+```
+
+**Required:**
+
+*   `--playlist-url URL`: The full URL of the YouTube playlist to download.
+
+**Options:**
+
+*   `-d`, `--directory DIRECTORY`: Directory to save downloaded MP3 files (default: `youtube_downloads/`).
+*   `--keep-intermediate-files`: If set, keeps all files downloaded by `yt-dlp` (original audio/video format, thumbnails like `.webp`/`.png`, etc.) instead of just the final `.mp3`. Defaults to deleting intermediate files. Controlled by `MP3IFY_KEEP_INTERMEDIATE` env var if flag not used.
+
+**Example:**
+
+```bash
+# Download audio from a YouTube playlist to the default ./youtube_downloads folder
+python mp3ify.py from-youtube --playlist-url "https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxx"
+
+# Download to a custom folder
+python mp3ify.py from-youtube --playlist-url "https://www.youtube.com/playlist?list=PLxxxxxxxxxxxxxxx" -d ./my_youtube_music
+```
+
 ### Testing Spotify to Local Sync
 
 To test downloading tracks from a specific sample playlist into the `tests/mp3` directory, first ensure the directory exists (`mkdir -p tests/mp3`) and then run:
@@ -219,4 +259,66 @@ This command will fetch tracks from the specified playlist, search for them on Y
 
 ### Common Options
 
-*   `--env-file FILE_PATH`: Specify a custom path for the `.env`
+*   `--env-file FILE_PATH`: Specify a custom path for the `.env` file.
+*   `--num-cores N`: Set the maximum number of parallel worker threads for download operations (`from-spotify`). Set to `0` to use the maximum available cores. Defaults to 5, or the value of the `NUMCORES` environment variable if set. (Note: This currently only affects the `from-spotify` command's parallel search/download; `from-youtube` relies on `yt-dlp`'s internal handling).
+*   Authentication flags (`--oauthclientid`, etc.) can be used with `to-spotify` and `from-spotify`.
+
+### Environment Variables
+
+*   `SPOTIPY_CLIENT_ID`: Your Spotify application Client ID.
+*   `SPOTIPY_CLIENT_SECRET`: Your Spotify application Client Secret.
+*   `SPOTIPY_REDIRECT_URI`: Your Spotify application Redirect URI (e.g., `http://127.0.0.1:8888`).
+*   `NUMCORES`: Overrides the default number of parallel workers (5) for `from-spotify`. Command-line argument `--num-cores` takes precedence. Set to `0` for maximum available cores.
+*   `MP3IFY_KEEP_INTERMEDIATE`: Set to `true`, `1`, or `yes` to keep all intermediate files (original format, thumbnails) when using the `from-youtube` command. Defaults to `false`. The `--keep-intermediate-files` command-line flag takes precedence.
+
+## Example Workflow: YouTube -> Local -> Spotify -> Local
+
+Here's a sequence demonstrating how you might use `mp3ify` to download a YouTube playlist, upload its contents to Spotify, and then re-download that Spotify playlist:
+
+1.  **Download YouTube Playlist to Local Folder:**
+    Download the audio tracks from the specified YouTube playlist into a local directory named `mp3`.
+    ```bash
+    python mp3ify.py from-youtube --playlist-url https://www.youtube.com/playlist?list=PLidIjcybOMhyQDmIGJglNjAQFR0BLFZ_m -d mp3
+    ```
+    *(This will create sanitized MP3 files like `01 - Title One.mp3`, `02 - Title Two.mp3`, etc., in the `./mp3` directory)*
+
+2.  **Sync Local Folder to New Spotify Playlist:**
+    Scan the `./mp3` directory created in the previous step, search for matches on Spotify, and create/update a Spotify playlist named "Jinjer" with the found tracks.
+    ```bash
+    python mp3ify.py to-spotify -d mp3 --playlist "Jinjer"
+    ```
+    *(This requires Spotify authentication and will create a private playlist named "Jinjer" on your Spotify account if it doesn't exist.)*
+
+3.  **Sync New Spotify Playlist Back to a Different Local Folder:**
+    Download the tracks from the "Jinjer" playlist (created in step 2) to a *new* local directory named `mp3_from_spotify`. **Note:** You first need to find the Playlist ID for your "Jinjer" playlist (e.g., by finding the playlist in Spotify, clicking "Share", and copying the Playlist Link - the ID is the string of characters after `playlist/` and before `?`).
+    ```bash
+    # Replace <JINJER_PLAYLIST_ID> with the actual ID found on Spotify
+    python mp3ify.py from-spotify --playlist-id <JINJER_PLAYLIST_ID> -d mp3_from_spotify
+    ```
+    *(This will search YouTube for each track in the "Jinjer" playlist and download the best match into the `./mp3_from_spotify` directory, attempting to embed metadata from Spotify.)*
+
+## Development
+
+This project uses `uv` for environment management and `ruff` for linting/formatting, and `pyright` for type checking.
+
+1.  **Setup**: Follow the [Installation & Setup](#installation--setup-with-uv) steps.
+2.  **Activate environment**: `source .venv/bin/activate` (or equivalent for your shell).
+3.  **Run linters/formatters**:
+    ```bash
+    ruff check .
+    ruff format .
+    pyright .
+    ```
+4.  **Run tests**:
+    ```bash
+    pytest
+    ```
+5.  **Pre-commit hooks** (Optional but recommended):
+    ```bash
+    pre-commit install
+    ```
+    This will run checks automatically before each commit.
+
+## License
+
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
