@@ -8,7 +8,7 @@ from concurrent.futures import (
     as_completed,
 )  # Added for parallel downloads
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, cast
+from typing import Any, Dict, Iterator, List, Optional, cast, Tuple
 
 import eyed3
 import requests  # Added for album art download
@@ -21,6 +21,8 @@ from mutagen.id3._util import ID3NoHeaderError  # Added for metadata/album art
 from spotipy.oauth2 import SpotifyOAuth
 from youtubesearchpython import VideosSearch  # Added for YouTube search
 from yt_dlp import YoutubeDL
+from eyed3 import id3 # Explicitly import the id3 submodule
+from eyed3.id3.frames import CommentFrame # Import CommentFrame
 
 # Load environment variables from .env file if it exists
 load_dotenv()
@@ -294,58 +296,45 @@ def mp3_walk_directory(directory: str) -> Iterator[TrackInfo]:
         TrackInfo objects containing metadata for each valid MP3 found.
     """
     print(f"Scanning directory for MP3 files: {directory}")
-    try:
-        search_path = pathlib.Path(directory)
-        if not search_path.is_dir():
-            print(f"Error: Directory not found: {directory}")
-            return
+    search_path = pathlib.Path(directory)
+    if not search_path.is_dir():
+        print(f"Error: Directory not found: {directory}")
+        return
 
-        # Use glob to find all .mp3 files recursively
-        for filepath in search_path.glob("**/*.mp3"):
-            print(f"Processing file: {filepath.name}")
-            track_info = TrackInfo(filename=str(filepath))
-
-            try:
-                # Attempt to load ID3 tags using eyed3
-                mp3 = eyed3.load(filepath)
-                # Check if loading was successful and tags exist
-                if mp3 and mp3.tag:
-                    track_info.artist = mp3.tag.artist
-                    track_info.album = mp3.tag.album
-                    track_info.title = mp3.tag.title
-                    print(f"  Found ID3 tags: Artist='{track_info.artist}', Title='{track_info.title}'")
-                else:
-                    # If no tags, attempt to parse from filename
-                    print("  No ID3 tags found, attempting to parse filename...")
-                    track_info = _parse_track_from_filename(filepath)
-                    print(f"  Parsed from filename: Artist='{track_info.artist}', Title='{track_info.title}'")
-
-                # Only yield tracks that have enough info for Spotify search (at least a title)
-                if track_info.is_valid_for_spotify_search:
-                    yield track_info
-                else:
-                    print("  Skipping file - insufficient metadata (missing title).")
-
-            except Exception as e:
-                # Catch errors during individual file processing (e.g., corrupted file)
-                print(f"  Error processing file {filepath.name}: {e}")
-                # Continue to the next file
+    # Use glob to find all .mp3 files recursively
+    for filepath in search_path.glob("**/*.mp3"):
+        print(f"Processing file: {filepath.name}")
+        track_info = None # Initialize track_info
+        try:
+            # Attempt to load ID3 tags using eyed3
+            mp3 = eyed3.load(filepath)
+            # Check if loading was successful and tags exist
+            if mp3 and mp3.tag:
+                track_info = TrackInfo(
+                    filename=str(filepath),
+                    artist = mp3.tag.artist,
+                    album = mp3.tag.album,
+                    title = mp3.tag.title
+                )
+                print(f"  Found ID3 tags: Artist='{track_info.artist}', Title='{track_info.title}'")
+            else:
                 # If no tags, attempt to parse from filename
                 print("  No ID3 tags found, attempting to parse filename...")
                 track_info = _parse_track_from_filename(filepath)
                 print(f"  Parsed from filename: Artist='{track_info.artist}', Title='{track_info.title}'")
 
-                # Only yield tracks that have enough info for Spotify search (at least a title)
-                if track_info.is_valid_for_spotify_search:
-                    yield track_info
-                else:
-                    print("  Skipping file - insufficient metadata (missing title).")
+            # Only yield tracks that have enough info for Spotify search (at least a title)
+            if track_info and track_info.is_valid_for_spotify_search:
+                yield track_info
+            elif track_info: # If track_info was created but invalid
+                print("  Skipping file - insufficient metadata (missing title).")
+            # else: Error occurred before track_info creation
 
-    except Exception as e:
-        # Catch errors during individual file processing (e.g., corrupted file)
-        print(f"  Error processing file {filepath.name}: {e}")
-        # Continue to the next file
-        pass
+        except Exception as e:
+            # Catch errors during individual file processing (e.g., corrupted file)
+            print(f"  Error processing file {filepath.name}: {e}")
+            # Continue to the next file
+            pass # Explicitly pass to continue loop
 
 
 def _parse_track_from_filename(filepath: pathlib.Path) -> TrackInfo:
@@ -739,77 +728,159 @@ def download_track_from_youtube(track: TrackInfo, output_dir: pathlib.Path) -> b
 
 def rename_hook(d: Dict[str, Any]) -> None:
     """
-    yt-dlp hook function called after download and postprocessing.
-    Renames the final file using a sanitized title.
-    Only attempts rename on the final postprocessing step (after MP3 conversion).
+    yt-dlp hook called after download and postprocessing.
+    Renames the final MP3 file to 'Index - Artist - Title.mp3' format
+    and corrects the ID3 Title and Artist tags.
+    Ensures rename/tagging happens only once per file.
 
     Args:
         d: Dictionary passed by yt-dlp containing download status and info.
-           Expected keys: 'status', 'filename', 'info_dict', 'postprocessor'.
     """
-    # Only proceed if this is a "finished" status
+    # --- 1. Check status and that we have an MP3 file --- 
     if d['status'] != 'finished':
+        return # Only run on finished status
+
+    current_filepath_str = d.get('filename') or d.get('info_dict', {}).get('filepath')
+    if not current_filepath_str:
+        # print("  Rename Hook: Could not determine current filepath.")
+        return
+    current_filepath = pathlib.Path(current_filepath_str)
+
+    # Only proceed if the file extension is .mp3 (meaning conversion is done)
+    if current_filepath.suffix.lower() != '.mp3':
+        # print(f"  Rename Hook: Skipping non-MP3 file: {current_filepath.name}")
         return
 
-    # Check if this is the final postprocessing step (MP3 conversion)
-    postprocessor = d.get('postprocessor')
-    if postprocessor:
-        # Handle both string and dictionary cases
-        if isinstance(postprocessor, dict):
-            # If it's a dictionary, check its keys
-            if (postprocessor.get('key') != 'FFmpegExtractAudio' or
-                postprocessor.get('preferredcodec') != 'mp3'):
-                return
-        elif isinstance(postprocessor, str):
-            # If it's a string, check if it indicates audio extraction
-            if 'FFmpegExtractAudio' not in postprocessor:
-                return
-        else:
-            # Unknown postprocessor format, skip
-            return
-
-    original_filepath_str = d.get('filename') or d.get('info_dict', {}).get('filepath')
-    if not original_filepath_str:
-        print("  Rename Hook: Could not determine original filepath.")
-        return
-
-    original_filepath = pathlib.Path(original_filepath_str)
-    
-    # Only proceed if the file exists (avoid redundant rename attempts)
-    if not original_filepath.exists():
-        # print("  Rename Hook: Source file no longer exists, skipping rename.")
-        return
-
-    # Only proceed if the file is an MP3 (final format)
-    if original_filepath.suffix.lower() != '.mp3':
-        # print("  Rename Hook: Not an MP3 file yet, skipping rename.")
-        return
-
+    # --- 2. Extract Info and Parse Artist/Title --- 
     info_dict = d.get('info_dict', {})
+    if not info_dict:
+        # print("  Rename Hook: Missing info_dict.")
+        return
 
-    # Extract necessary info - playlist_index might be string or int
-    playlist_index_str = str(info_dict.get('playlist_index', '00'))
-    # Pad index with leading zero if needed for sorting
-    playlist_index_padded = playlist_index_str.zfill(2)
+    original_title = info_dict.get('title', current_filepath.stem)
+    playlist_index_str = str(info_dict.get('playlist_index', '00')).zfill(2)
 
-    original_title = info_dict.get('title', original_filepath.stem)
+    sanitized_title_string = sanitize_filename(original_title)
+    parsed_artist, parsed_title = parse_artist_title_from_string(sanitized_title_string)
 
-    # Sanitize the actual title
-    sanitized_title = sanitize_filename(original_title)
+    # --- 3. Construct the CORRECT Target Filename --- 
+    if parsed_artist and parsed_title:
+        base_filename = f"{playlist_index_str} - {parsed_artist} - {parsed_title}"
+    elif parsed_title:
+        base_filename = f"{playlist_index_str} - {parsed_title}"
+    else:
+         print(f"  Rename Hook: Could not determine title for {current_filepath.name}. Skipping.")
+         return
 
-    # Construct the new filename
-    new_filename = f"{playlist_index_padded} - {sanitized_title}{original_filepath.suffix}"
-    new_filepath = original_filepath.parent / new_filename
+    target_filename = f"{base_filename}.mp3"
+    target_filepath = current_filepath.parent / target_filename
 
-    # Only rename if the names are different and target doesn't exist
-    if original_filepath != new_filepath and not new_filepath.exists():
+    # --- 4. *** CRITICAL CHECK ***: Has this file already been processed? ---
+    # If the target file path is different from current and target already exists,
+    # assume a previous hook call completed the job.
+    if target_filepath != current_filepath and target_filepath.exists():
+        print(f"  Rename Hook: Target file {target_filename} already exists. Skipping.")
+        return
+    
+    # If the current file path *is* the target path, but we might still need to fix tags.
+    # However, if the target path exists check above passed, we don't need to do anything.
+    # If current == target and target doesn't exist (shouldn't happen), we proceed.
+
+    # --- 5. Ensure Source File Exists Before Acting ---
+    # This check prevents errors if the hook is called very late after a successful rename.
+    if not current_filepath.exists():
+        # print(f"  Rename Hook: Source file {current_filepath.name} not found.")
+        return
+
+    # --- 6. Rename File (if necessary) --- 
+    final_filepath = current_filepath # Path to use for tag fixing
+    if current_filepath != target_filepath:
         try:
-            print(f"  Renaming: '{original_filepath.name}' -> '{new_filename}'")
-            original_filepath.rename(new_filepath)
+            print(f"  Renaming: '{current_filepath.name}' -> '{target_filename}'")
+            current_filepath.rename(target_filepath)
+            final_filepath = target_filepath # Use the new path for tag fixing
         except OSError as e:
-            print(f"  Error renaming file {original_filepath.name} to {new_filename}: {e}")
+            print(f"  Error renaming file {current_filepath.name} to {target_filename}: {e}")
+            # If rename fails, stop processing this file in this hook call
+            return 
         except Exception as e:
             print(f"  Unexpected error during rename: {e}")
+            return
+    # else: Filename is already correct, proceed to tag fixing
+
+    # --- 7. Correct ID3 Tags (Only runs ONCE after potential rename) --- 
+    if not final_filepath.exists():
+         print(f"  ID3 Tag Fix: Final file path {final_filepath.name} not found. Cannot fix tags.")
+         return
+
+    print(f"  Fixing ID3 tags for: {final_filepath.name}")
+    try:
+        audiofile = eyed3.load(final_filepath)
+        if audiofile is None:
+            print(f"    Error: Could not load MP3 file {final_filepath.name} with eyed3.")
+            return
+        if audiofile.tag is None:
+            print("    Initializing new ID3 tag.")
+            audiofile.initTag()
+
+        if audiofile.tag is not None:
+            # Overwrite Title and Artist
+            if parsed_title:
+                # print(f"    Setting Title: '{parsed_title}'")
+                audiofile.tag.title = parsed_title
+            if parsed_artist:
+                # print(f"    Setting Artist: '{parsed_artist}'")
+                audiofile.tag.artist = parsed_artist
+            else:
+                # print("    Clearing Artist tag")
+                audiofile.tag.artist = None
+            
+            # --- Set Comment to YouTube URL using CommentFrame --- 
+            youtube_url = info_dict.get('webpage_url') # Get the original video URL
+            print(f"    Debug: Full YouTube URL received: {repr(youtube_url)}") # Print the full URL for verification
+            if youtube_url:
+                # Manually create a CommentFrame with only text initially
+                comment_frame = CommentFrame(description=u'', text=youtube_url)
+                # Set encoding and language afterwards
+                comment_frame.encoding = 3  # 3: UTF-8
+                comment_frame.lang = b'XXX' # XXX: Undefined language
+                # Use comments.set() with the configured frame object in a list
+                audiofile.tag.comments.set([comment_frame])
+                print(f"    Set Comment tag to: {youtube_url}")
+            else:
+                # Clear comments if URL wasn't found
+                audiofile.tag.comments.set([])
+                print("    Cleared Comment tag (YouTube URL not found).")
+            
+            # Save the corrected tags
+            audiofile.tag.save(version=id3.ID3_V2_3, encoding='utf-8')
+            print(f"    Successfully updated ID3 tags for {final_filepath.name}.")
+        else:
+            print("    Error: Tag object could not be initialized or accessed after initTag.")
+
+    except Exception as e:
+        print(f"  Error fixing ID3 tags for {final_filepath.name}: {e}")
+
+
+def parse_artist_title_from_string(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Attempts to parse Artist and Title from a string, assuming "Artist - Title" format.
+
+    Args:
+        text: The string to parse (ideally already sanitized).
+
+    Returns:
+        A tuple (artist, title). Returns (None, text) if parsing fails.
+    """
+    parts = text.split(" - ", 1) # Split only on the first occurrence
+    if len(parts) == 2:
+        artist = parts[0].strip()
+        title = parts[1].strip()
+        # Basic check: avoid empty strings after stripping
+        if artist and title:
+            return artist, title
+    # If split fails or results in empty parts, return the original text as title
+    return None, text.strip()
 
 
 def run_sync_to_spotify(args: Namespace, connection: SpotifyConnection) -> int:
@@ -1047,23 +1118,12 @@ def run_sync_from_youtube(args: Namespace) -> int:
         return 1
 
     # --- Determine Default for Keeping Intermediate Files (YouTube Only) ---
-    default_keep_intermediate = False
-    try:
-        env_keep = os.environ.get("MP3IFY_KEEP_INTERMEDIATE", "false").lower()
-        if env_keep in ('true', '1', 'yes', 'y'):
-            default_keep_intermediate = True
-            print(f"Using MP3IFY_KEEP_INTERMEDIATE environment variable: {default_keep_intermediate}")
-    except Exception: # Catch potential errors during env var processing
-        print(f"Warning: Invalid value for MP3IFY_KEEP_INTERMEDIATE env var. Using default: {default_keep_intermediate}")
-        default_keep_intermediate = False
+    # This logic is now primarily in setup(), but we retrieve the final value.
+    keep_intermediate = args.keep_intermediate_files
+    print(f"Intermediate files will be kept: {keep_intermediate}") # Debug print
 
     # --- Configure yt-dlp options for playlist download ---
-    # Let yt-dlp initially name the file however it wants (e.g., using video ID or original title).
-    # The hook will rename it based on sanitized title and index later.
-    # Using a simple template like video ID can avoid initial filename issues.
-    # Or keep the title template, the hook can still find it.
-    # Let's keep the title template for now, hook will find it via d['filename'].
-    output_template = output_dir / sanitize_filename("%(playlist_index)s - %(title)s.%(ext)s")
+    output_template = output_dir / "%(playlist_index)s - %(title)s.%(ext)s"
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -1072,20 +1132,21 @@ def run_sync_from_youtube(args: Namespace) -> int:
         "ignoreerrors": True,
         "quiet": False,
         "noprogress": False,
-        # --- Set keepvideo based on the argument ---
-        "keepvideo": args.keep_intermediate_files, # If True, keeps original + intermediates
+        "keepvideo": keep_intermediate, 
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "192",
             },
+            # Metadata PP is still useful for Year, etc.
             {'key': 'FFmpegMetadata', 'add_metadata': True},
-            {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
+            # Remove EmbedThumbnail postprocessor
+            # {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
         ],
-        "writethumbnail": False,
-        "addmetadata": True,
-        'embedthumbnail': False,
+        # --- Disable thumbnail download and embedding --- 
+        "writethumbnail": False, 
+        # 'embedthumbnail': True, # No longer needed
         'retries': MAX_RETRIES,
         'postprocessor_hooks': [rename_hook],
     }
@@ -1097,10 +1158,10 @@ def run_sync_from_youtube(args: Namespace) -> int:
 
         if error_code == 0:
             print("\nPlaylist download process completed successfully (check logs for skipped/renamed files).")
-            if args.keep_intermediate_files:
-                print("(Note: Intermediate files like original downloads and thumbnails were kept.)")
+            if keep_intermediate:
+                print("\n(Note: Intermediate files like original downloads and thumbnails were kept as requested.)")
             else:
-                print("(Note: Intermediate files were deleted, only final MP3s remain.)")
+                print("\n(Note: Intermediate files should have been deleted; only final MP3s remain.)")
             return 0
         else:
             print(f"\nPlaylist download process finished, but yt-dlp reported errors (exit code: {error_code}).")
