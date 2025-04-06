@@ -299,26 +299,4 @@ Here's a sequence demonstrating how you might use `mp3ify` to download a YouTube
 
 ## Development
 
-This project uses `uv` for environment management and `ruff` for linting/formatting, and `pyright` for type checking.
-
-1.  **Setup**: Follow the [Installation & Setup](#installation--setup-with-uv) steps.
-2.  **Activate environment**: `source .venv/bin/activate` (or equivalent for your shell).
-3.  **Run linters/formatters**:
-    ```bash
-    ruff check .
-    ruff format .
-    pyright .
-    ```
-4.  **Run tests**:
-    ```bash
-    pytest
-    ```
-5.  **Pre-commit hooks** (Optional but recommended):
-    ```bash
-    pre-commit install
-    ```
-    This will run checks automatically before each commit.
-
 ## License
-
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.

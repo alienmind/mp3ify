@@ -8,7 +8,7 @@ from concurrent.futures import (
     as_completed,
 )  # Added for parallel downloads
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, cast, Tuple
+from typing import Any, Dict, Iterator, List, Optional, cast
 
 import eyed3
 import requests  # Added for album art download
@@ -277,7 +277,7 @@ def spotify_create_playlist(
         return playlistid
     except Exception as e:
         print(f"Error creating Spotify playlist: {e}")
-        return None
+    return None
 
 
 def mp3_walk_directory(directory: str) -> Iterator[TrackInfo]:
@@ -330,10 +330,22 @@ def mp3_walk_directory(directory: str) -> Iterator[TrackInfo]:
                 # Catch errors during individual file processing (e.g., corrupted file)
                 print(f"  Error processing file {filepath.name}: {e}")
                 # Continue to the next file
-                pass
+                # If no tags, attempt to parse from filename
+                print("  No ID3 tags found, attempting to parse filename...")
+                track_info = _parse_track_from_filename(filepath)
+                print(f"  Parsed from filename: Artist='{track_info.artist}', Title='{track_info.title}'")
+
+                # Only yield tracks that have enough info for Spotify search (at least a title)
+                if track_info.is_valid_for_spotify_search:
+                    yield track_info
+                else:
+                    print("  Skipping file - insufficient metadata (missing title).")
+
     except Exception as e:
-        # Catch errors related to directory access or globbing
-        print(f"Error scanning directory {directory}: {e}")
+        # Catch errors during individual file processing (e.g., corrupted file)
+        print(f"  Error processing file {filepath.name}: {e}")
+        # Continue to the next file
+        pass
 
 
 def _parse_track_from_filename(filepath: pathlib.Path) -> TrackInfo:
@@ -516,6 +528,7 @@ def sanitize_filename(name: str) -> str:
     """
     # 1. Remove common YouTube additions (case-insensitive)
     #    Patterns like (Official Music Video), [Lyrics], | Artist Name etc.
+    # also remove any special characters such as |, #, *, etc.
     name = re.sub(r'\s*\(.*Official Video.*?\)\s*', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s*\(.*Music Video.*?\)\s*', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s*\(.*Lyric Video.*?\)\s*', '', name, flags=re.IGNORECASE)
@@ -523,7 +536,9 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r'\s*\[.*?\]\s*', '', name) # Remove content in square brackets
     name = re.sub(r'\s*\|.*$', '', name) # Remove pipe and everything after
     name = re.sub(r'\s*//.*$', '', name) # Remove double slash and everything after
-
+    name = re.sub(r'\s*#.*$', '', name) # Remove hash and everything after
+    name = re.sub(r'\s*\*.*$', '', name) # Remove asterisk and everything after
+        
     # 2. Remove characters invalid in filenames
     name = re.sub(r'[<>:"/\\|?*\n\t]', "", name)
 
@@ -671,12 +686,12 @@ def download_track_from_youtube(track: TrackInfo, output_dir: pathlib.Path) -> b
                 "preferredcodec": "mp3", # Convert to MP3
                 "preferredquality": "192", # Set MP3 quality (e.g., 192kbps)
             },
-            # Add metadata using FFmpeg during post-processing
+             # Add metadata using FFmpeg during post-processing
              {'key': 'FFmpegMetadata', 'add_metadata': True},
              # Embed thumbnail using FFmpeg (requires thumbnail download)
              {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
         ],
-        "writethumbnail": True, # Tell yt-dlp to download the thumbnail
+        "writethumbnail": False, # Tell yt-dlp to download the thumbnail
         "addmetadata": True, # Tell yt-dlp to add metadata if possible (might be redundant with FFmpegMetadata)
         # Using 'metadatafromtitle' might be unreliable, prefer specific metadata args if possible
         # 'metadatafromtitle': '%(artist)s - %(title)s',
@@ -685,7 +700,7 @@ def download_track_from_youtube(track: TrackInfo, output_dir: pathlib.Path) -> b
         #                 '-metadata', f'artist={track.artist}',
         #                 '-metadata', f'album={track.album or "Unknown Album"}']
         # },
-        'embedthumbnail': True, # Tell FFmpeg postprocessor to embed downloaded thumbnail
+        'embedthumbnail': False, # Tell FFmpeg postprocessor to embed downloaded thumbnail
         'ignoreerrors': True, # Continue if a specific download fails
         'retries': MAX_RETRIES, # Retry downloads on transient errors
         # 'fragment_retries': MAX_RETRIES, # Also retry fragments if applicable
@@ -722,181 +737,79 @@ def download_track_from_youtube(track: TrackInfo, output_dir: pathlib.Path) -> b
         return False
 
 
-def _parse_youtube_title(raw_title: str) -> str:
-    """
-    Cleans a raw YouTube video title by removing common additions.
-
-    Args:
-        raw_title: The original title string from YouTube.
-
-    Returns:
-        A cleaned title string.
-    """
-    cleaned_title = raw_title # Start with the raw title
-
-    # Apply aggressive cleaning (remove common junk)
-    cleaned_title = re.sub(r'\s*\(.*Official Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
-    cleaned_title = re.sub(r'\s*\(.*Music Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
-    cleaned_title = re.sub(r'\s*\(.*Lyric Video.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
-    cleaned_title = re.sub(r'\s*\(.*Audio.*?\)\s*', '', cleaned_title, flags=re.IGNORECASE)
-    cleaned_title = re.sub(r'\s*\[.*?\]\s*', '', cleaned_title) # Remove content in square brackets
-    cleaned_title = re.sub(r'\s*\|.*$', '', cleaned_title) # Remove pipe and everything after
-    cleaned_title = re.sub(r'\s*//.*$', '', cleaned_title) # Remove double slash and everything after
-    # Add more specific rules if needed, e.g., removing " | Napalm Records" specifically
-    # cleaned_title = re.sub(r'\s*\|\s*Napalm Records\s*$', '', cleaned_title, flags=re.IGNORECASE)
-
-    # Remove potential leftover invalid filename chars AFTER specific cleaning
-    cleaned_title = re.sub(r'[<>:"/\\|?*\n\t]', "", cleaned_title)
-    # Clean up whitespace
-    cleaned_title = re.sub(r"\s+", " ", cleaned_title).strip()
-    # Clean potential leading/trailing hyphens left from splits/removals
-    cleaned_title = cleaned_title.strip("- ")
-
-    print(f"  Cleaned YT Title: '{cleaned_title}' (From: '{raw_title[:50]}...')")
-    return cleaned_title
-
-
-# --- Add Helper to Write Tags ---
-def _write_youtube_tags(filepath: pathlib.Path, artist: Optional[str], title: Optional[str], info_dict: Dict):
-    """
-    Writes ID3 tags (artist, title, album art) to an MP3 file using Mutagen,
-    specifically for files downloaded from YouTube.
-
-    Args:
-        filepath: Path to the MP3 file.
-        artist: The guessed artist name.
-        title: The cleaned title.
-        info_dict: The yt-dlp info dictionary containing thumbnail path.
-    """
-    if not filepath.is_file():
-        print(f"  Error writing tags: File not found at {filepath}")
-        return
-
-    print(f"  Writing ID3 Tags for: {filepath.name}")
-    try:
-        # --- Add Basic Tags (Title, Artist) ---
-        try:
-            audio = EasyID3(filepath)
-        except ID3NoHeaderError:
-            print(f"    No ID3 header found, creating one for {filepath.name}.")
-            audio_id3_create = ID3()
-            audio_id3_create.save(filepath)
-            audio = EasyID3(filepath)
-
-        if title:
-            audio["title"] = title
-            # Clear potentially incorrect album extracted by yt-dlp if we only have title/artist
-            if "album" in audio: del audio["album"]
-        if artist:
-            audio["artist"] = artist
-        audio.save()
-        print(f"    Saved Title='{title}', Artist='{artist}'")
-
-        # --- Embed Thumbnail as Album Art ---
-        # yt-dlp puts the final thumbnail path in 'thumbnail' key AFTER processing
-        thumbnail_path_str = info_dict.get('thumbnail')
-        if thumbnail_path_str and pathlib.Path(thumbnail_path_str).is_file():
-            thumbnail_path = pathlib.Path(thumbnail_path_str)
-            print(f"    Attempting to embed thumbnail: {thumbnail_path.name}")
-            try:
-                with open(thumbnail_path, 'rb') as art_file:
-                    image_data = art_file.read()
-
-                # Determine MIME type from file extension
-                ext = thumbnail_path.suffix.lower()
-                if ext in ['.jpg', '.jpeg']:
-                    mime = 'image/jpeg'
-                elif ext == '.png':
-                    mime = 'image/png'
-                elif ext == '.webp':
-                     mime = 'image/webp' # Mutagen supports webp in APIC
-                else:
-                    print(f"    Warning: Unsupported thumbnail image type '{ext}', skipping embed.")
-                    return
-
-                audio_id3_art = ID3(filepath)
-                audio_id3_art.delall('APIC') # Remove existing art
-                audio_id3_art.add(
-                    APIC(
-                        encoding=3, mime=mime, type=3, desc='Cover', data=image_data
-                    )
-                )
-                audio_id3_art.save(v2_version=3)
-                print(f"    Successfully embedded thumbnail as album art.")
-
-            except FileNotFoundError:
-                 print(f"    Error embedding thumbnail: File not found at {thumbnail_path_str}")
-            except Exception as art_e:
-                 print(f"    Error embedding thumbnail: {art_e}")
-        else:
-            print(f"    No valid thumbnail path found in info_dict ('{thumbnail_path_str}').")
-
-    except Exception as meta_e:
-        print(f"  Error writing tags to {filepath.name}: {meta_e}")
-
-
-def rename_hook(d: Dict[str, Any]):
+def rename_hook(d: Dict[str, Any]) -> None:
     """
     yt-dlp hook function called after download and postprocessing.
-    Finds the final MP3 file, renames it using playlist index, uploader/channel as artist,
-    and sanitized title, then writes cleaned ID3 tags.
+    Renames the final file using a sanitized title.
+    Only attempts rename on the final postprocessing step (after MP3 conversion).
 
     Args:
         d: Dictionary passed by yt-dlp containing download status and info.
+           Expected keys: 'status', 'filename', 'info_dict', 'postprocessor'.
     """
-    if d['status'] == 'finished':
-        info_dict = d.get('info_dict', {})
-        final_filepath_str = info_dict.get('filepath') or d.get('filename')
-        if not final_filepath_str: # ... (error handling) ...
-             return
-        final_filepath = pathlib.Path(final_filepath_str).resolve()
-        if not final_filepath.is_file() or final_filepath.suffix.lower() != '.mp3': # ... (error handling) ...
-             return
+    # Only proceed if this is a "finished" status
+    if d['status'] != 'finished':
+        return
 
-        # --- Get necessary info for new name and tags ---
-        playlist_index_str = str(info_dict.get('playlist_index', '00'))
-        playlist_index_padded = playlist_index_str.zfill(2)
-        raw_title = info_dict.get('title', final_filepath.stem)
-
-        # --- Determine Artist (Uploader/Channel) and Clean Title ---
-        # Use 'uploader' or 'channel' as the best guess for Artist
-        artist_guess = info_dict.get('uploader') or info_dict.get('channel') or "Unknown Artist"
-        # Clean the raw title using the simplified function
-        cleaned_title = _parse_youtube_title(raw_title)
-
-        # --- Construct New Filename ---
-        # Combine index, guessed artist, and cleaned title
-        new_filename_stem = f"{playlist_index_padded} - {artist_guess} - {cleaned_title}"
-        # Sanitize the fully constructed stem
-        new_filename_stem_sanitized = sanitize_filename(new_filename_stem)
-        new_filename = f"{new_filename_stem_sanitized}.mp3"
-        new_filepath = final_filepath.parent / new_filename
-
-        # --- Perform Rename ---
-        final_path_for_tags = None
-        # ... (rest of rename logic remains the same, determining final_path_for_tags) ...
-        if final_filepath == new_filepath:
-             print(f"  Filename already correct: '{final_filepath.name}'")
-             final_path_for_tags = final_filepath # Use the existing path
+    # Check if this is the final postprocessing step (MP3 conversion)
+    postprocessor = d.get('postprocessor')
+    if postprocessor:
+        # Handle both string and dictionary cases
+        if isinstance(postprocessor, dict):
+            # If it's a dictionary, check its keys
+            if (postprocessor.get('key') != 'FFmpegExtractAudio' or
+                postprocessor.get('preferredcodec') != 'mp3'):
+                return
+        elif isinstance(postprocessor, str):
+            # If it's a string, check if it indicates audio extraction
+            if 'FFmpegExtractAudio' not in postprocessor:
+                return
         else:
-            try:
-                print(f"  Renaming: '{final_filepath.name}' -> '{new_filename}'")
-                final_filepath.rename(new_filepath)
-                final_path_for_tags = new_filepath # Use the new path for tags
-            except OSError as e:
-                print(f"  ERROR renaming file '{final_filepath.name}' to '{new_filename}': {e}")
-                if final_filepath.is_file():
-                     print(f"  Attempting to write tags to original file path: {final_filepath.name}")
-                     final_path_for_tags = final_filepath
-            except Exception as e:
-                 print(f"  Unexpected error during rename: {e}")
+            # Unknown postprocessor format, skip
+            return
 
-        # --- Write Corrected ID3 Tags ---
-        if final_path_for_tags:
-            # Pass the determined artist and cleaned title to the tag writer
-            _write_youtube_tags(final_path_for_tags, artist_guess, cleaned_title, info_dict)
-        else:
-             print(f"  Skipping tag writing due to rename/file access issues for original: {final_filepath.name}")
+    original_filepath_str = d.get('filename') or d.get('info_dict', {}).get('filepath')
+    if not original_filepath_str:
+        print("  Rename Hook: Could not determine original filepath.")
+        return
+
+    original_filepath = pathlib.Path(original_filepath_str)
+    
+    # Only proceed if the file exists (avoid redundant rename attempts)
+    if not original_filepath.exists():
+        # print("  Rename Hook: Source file no longer exists, skipping rename.")
+        return
+
+    # Only proceed if the file is an MP3 (final format)
+    if original_filepath.suffix.lower() != '.mp3':
+        # print("  Rename Hook: Not an MP3 file yet, skipping rename.")
+        return
+
+    info_dict = d.get('info_dict', {})
+
+    # Extract necessary info - playlist_index might be string or int
+    playlist_index_str = str(info_dict.get('playlist_index', '00'))
+    # Pad index with leading zero if needed for sorting
+    playlist_index_padded = playlist_index_str.zfill(2)
+
+    original_title = info_dict.get('title', original_filepath.stem)
+
+    # Sanitize the actual title
+    sanitized_title = sanitize_filename(original_title)
+
+    # Construct the new filename
+    new_filename = f"{playlist_index_padded} - {sanitized_title}{original_filepath.suffix}"
+    new_filepath = original_filepath.parent / new_filename
+
+    # Only rename if the names are different and target doesn't exist
+    if original_filepath != new_filepath and not new_filepath.exists():
+        try:
+            print(f"  Renaming: '{original_filepath.name}' -> '{new_filename}'")
+            original_filepath.rename(new_filepath)
+        except OSError as e:
+            print(f"  Error renaming file {original_filepath.name} to {new_filename}: {e}")
+        except Exception as e:
+            print(f"  Unexpected error during rename: {e}")
 
 
 def run_sync_to_spotify(args: Namespace, connection: SpotifyConnection) -> int:
@@ -1145,33 +1058,36 @@ def run_sync_from_youtube(args: Namespace) -> int:
         default_keep_intermediate = False
 
     # --- Configure yt-dlp options for playlist download ---
-    # Use a simple, reliable template like video ID initially.
-    # The hook will rename the final file based on sanitized title and index.
-    output_template = output_dir / "%(id)s.%(ext)s" # Use video ID for initial temp name
+    # Let yt-dlp initially name the file however it wants (e.g., using video ID or original title).
+    # The hook will rename it based on sanitized title and index later.
+    # Using a simple template like video ID can avoid initial filename issues.
+    # Or keep the title template, the hook can still find it.
+    # Let's keep the title template for now, hook will find it via d['filename'].
+    output_template = output_dir / sanitize_filename("%(playlist_index)s - %(title)s.%(ext)s")
 
     ydl_opts = {
         "format": "bestaudio/best",
-        "outtmpl": str(output_template), # Initial template using video ID
+        "outtmpl": str(output_template),
         "noplaylist": False,
         "ignoreerrors": True,
         "quiet": False,
         "noprogress": False,
-        "keepvideo": args.keep_intermediate_files,
+        # --- Set keepvideo based on the argument ---
+        "keepvideo": args.keep_intermediate_files, # If True, keeps original + intermediates
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "192",
             },
-            # Metadata/Thumbnail embedding PPs should run before our rename hook
-            {'key': 'FFmpegMetadata', 'add_metadata': True}, # Add whatever metadata yt-dlp can find initially
+            {'key': 'FFmpegMetadata', 'add_metadata': True},
             {'key': 'EmbedThumbnail', 'already_have_thumbnail': False},
         ],
-        "writethumbnail": True,
-        # 'addmetadata': True, # FFmpegMetadata is likely sufficient
-        'embedthumbnail': True, # Tell FFmpeg PP to embed
+        "writethumbnail": False,
+        "addmetadata": True,
+        'embedthumbnail': False,
         'retries': MAX_RETRIES,
-        'postprocessor_hooks': [rename_hook], # Our hook runs last
+        'postprocessor_hooks': [rename_hook],
     }
 
     print(f"Attempting to download playlist: {args.playlist_url}")
